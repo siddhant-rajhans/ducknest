@@ -4,3 +4,8 @@ gTTS
 SpeechRecognition
 numpy
 elevenlabs
+Flask
+python-dotenv
+requests
+supabase
+
