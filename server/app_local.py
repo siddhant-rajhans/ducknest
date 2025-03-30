@@ -24,7 +24,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 # Initialize Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # API endpoints
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -35,10 +35,6 @@ def load_housing_data():
     Load housing data from Supabase
     """
     try:
-        if not supabase:
-            logger.warning("Supabase client not initialized. Falling back to dummy data.")
-            return DUMMY_HOUSING_DATA
-            
         response = supabase.table('houses').select('*').execute()
         return response.data
     except Exception as e:
@@ -51,10 +47,6 @@ def initialize_database():
     """
     Initialize database with dummy data if tables are empty
     """
-    if not supabase:
-        logger.warning("Supabase client not initialized. Skipping database initialization.")
-        return
-        
     try:
         # Check if houses table has data
         houses_response = supabase.table('houses').select('count').execute()
@@ -236,34 +228,22 @@ def generate_audio(text):
         )
         response.raise_for_status()
         
-        # For Render deployment, don't save file locally (ephemeral filesystem)
-        # Instead, just use base64 encoding for response
+        # Save audio file locally
+        timestamp = int(time.time())
+        audio_filename = f"audio_{timestamp}.mp3"
+        audio_path = os.path.join("audio_files", audio_filename)
+        
+        # Ensure directory exists
+        os.makedirs("audio_files", exist_ok=True)
+        
+        with open(audio_path, "wb") as f:
+            f.write(response.content)
+        
+        # Return audio content as base64 and the file path
         audio_base64 = base64.b64encode(response.content).decode('utf-8')
-        
-        # If we have Supabase, store the audio there
-        audio_url = None
-        if supabase:
-            try:
-                timestamp = int(time.time())
-                filename = f"audio_{timestamp}.mp3"
-                audio_bucket = "audio_files"
-                
-                # Upload to Supabase storage
-                result = supabase.storage.from_(audio_bucket).upload(
-                    file=response.content,
-                    path=filename,
-                    file_options={"content-type": "audio/mpeg"}
-                )
-                
-                # Get public URL
-                audio_url = supabase.storage.from_(audio_bucket).get_public_url(filename)
-                logger.info(f"Uploaded audio to Supabase storage: {audio_url}")
-            except Exception as e:
-                logger.error(f"Error uploading audio to Supabase: {e}")
-        
         return {
             "audio_base64": audio_base64,
-            "audio_url": audio_url
+            "audio_path": audio_path
         }
         
     except requests.exceptions.RequestException as e:
@@ -273,20 +253,16 @@ def generate_audio(text):
         logger.error(f"Unexpected error in generate_audio: {e}")
         return None
 
-def store_response_in_db(user_query, recommendation_data, explanation_text, audio_url=None):
+def store_response_in_db(user_query, recommendation_data, explanation_text, audio_path=None):
     """
     Store the response in the Supabase database
     """
-    if not supabase:
-        logger.warning("Supabase client not initialized. Skipping database storage.")
-        return None
-        
     try:
         response_data = {
             "user_query": user_query,
             "recommendation_data": recommendation_data,
             "explanation_text": explanation_text,
-            "audio_url": audio_url,
+            "audio_path": audio_path,
             "created_at": str(time.time())
         }
         
@@ -325,15 +301,14 @@ def recommend_housing():
         audio_result = generate_audio(explanation_text)
         
         # Store the response in the database
-        audio_url = audio_result.get("audio_url") if audio_result else None
-        response_id = store_response_in_db(user_query, recommendation_data, explanation_text, audio_url)
+        audio_path = audio_result.get("audio_path") if audio_result else None
+        response_id = store_response_in_db(user_query, recommendation_data, explanation_text, audio_path)
         
         # Prepare the final response
         response = {
             "text_response": recommendation_data,
             "explanation_text": explanation_text,
             "audio_response": audio_result.get("audio_base64") if audio_result else None,
-            "audio_url": audio_url,
             "response_id": response_id
         }
         
@@ -343,168 +318,161 @@ def recommend_housing():
         logger.error(f"Error in recommend_housing endpoint: {e}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
-@app.route('/', methods=['GET'])
-def health_check():
-    """
-    Simple health check endpoint for Render to verify the service is running
-    """
-    return jsonify({"status": "ok", "message": "Housing recommendation API is running"})
-
-# Dummy housing data for Stevens Institute of Technology area
-DUMMY_HOUSING_DATA = [
-    {
-        "id": "h001",
-        "city": "Hoboken",
-        "street_address": "215 River St",
-        "rent": 1850,
-        "lease_duration": "12 months",
-        "availability_date": "2025-04-15",
-        "furnished": True,
-        "utilities_included": True,
-        "wifi_available": True,
-        "no_of_bedrooms": 1,
-        "no_of_bathrooms": 1,
-        "house_type": "Apartment",
-        "distance_to_college": "0.3 miles",
-        "transportation_options": ["Bus", "Path Train"],
-        "recommended_by": "John Smith",
-        "contact_details": "15551112233",
-        "image_urls": ["assets/house1.jpg", "assets/house1_2.jpg", "assets/house1_3.jpg"]
-    },
-    {
-        "id": "h002",
-        "city": "Hoboken",
-        "street_address": "78 Washington St",
-        "rent": 2100,
-        "lease_duration": "9 months",
-        "availability_date": "2025-04-10",
-        "furnished": True,
-        "utilities_included": True,
-        "wifi_available": True,
-        "no_of_bedrooms": 1,
-        "no_of_bathrooms": 1,
-        "house_type": "Studio",
-        "distance_to_college": "0.2 miles",
-        "transportation_options": ["Bus", "Path Train"],
-        "recommended_by": "Sarah Johnson",
-        "contact_details": "15551115566",
-        "image_urls": ["assets/house2.jpg", "assets/house2_2.jpg", "assets/house2_3.jpg"]
-    },
-    {
-        "id": "h003",
-        "city": "Hoboken",
-        "street_address": "420 Hudson St",
-        "rent": 2650,
-        "lease_duration": "12 months",
-        "availability_date": "2025-05-01",
-        "furnished": True,
-        "utilities_included": False,
-        "wifi_available": True,
-        "no_of_bedrooms": 2,
-        "no_of_bathrooms": 1,
-        "house_type": "Apartment",
-        "distance_to_college": "0.4 miles",
-        "transportation_options": ["Bus", "Path Train"],
-        "recommended_by": "Mike Peters",
-        "contact_details": "15551117788",
-        "image_urls": ["assets/house3.jpg", "assets/house3_2.jpg"]
-    },
-    {
-        "id": "h004",
-        "city": "Jersey City",
-        "street_address": "25 River Dr",
-        "rent": 1950,
-        "lease_duration": "6 months",
-        "availability_date": "2025-04-05",
-        "furnished": False,
-        "utilities_included": False,
-        "wifi_available": False,
-        "no_of_bedrooms": 1,
-        "no_of_bathrooms": 1,
-        "house_type": "Condo",
-        "distance_to_college": "1.2 miles",
-        "transportation_options": ["Bus", "Path Train", "Light Rail"],
-        "recommended_by": "Jane Doe",
-        "contact_details": "15551118899",
-        "image_urls": ["assets/house4.jpg"]
-    },
-    {
-        "id": "h005",
-        "city": "Hoboken",
-        "street_address": "89 Willow Ave",
-        "rent": 1700,
-        "lease_duration": "12 months",
-        "availability_date": "2025-04-20",
-        "furnished": False,
-        "utilities_included": True,
-        "wifi_available": True,
-        "no_of_bedrooms": 1,
-        "no_of_bathrooms": 1,
-        "house_type": "Apartment",
-        "distance_to_college": "0.5 miles",
-        "transportation_options": ["Bus"],
-        "recommended_by": "Robert Chen",
-        "contact_details": "15551119900",
-        "image_urls": ["assets/house5.jpg", "assets/house5_2.jpg"]
-    },
-    {
-        "id": "h006",
-        "city": "Hoboken",
-        "street_address": "505 Madison St",
-        "rent": 3200,
-        "lease_duration": "12 months",
-        "availability_date": "2025-05-15",
-        "furnished": True,
-        "utilities_included": True,
-        "wifi_available": True,
-        "no_of_bedrooms": 3,
-        "no_of_bathrooms": 2,
-        "house_type": "Townhouse",
-        "distance_to_college": "0.7 miles",
-        "transportation_options": ["Bus", "Path Train"],
-        "recommended_by": "Lisa Martinez",
-        "contact_details": "15551110011",
-        "image_urls": ["assets/house6.jpg", "assets/house6_2.jpg", "assets/house6_3.jpg"]
-    },
-    {
-        "id": "h007",
-        "city": "Hoboken",
-        "street_address": "123 Clinton St",
-        "rent": 2000,
-        "lease_duration": "9 months",
-        "availability_date": "2025-04-01",
-        "furnished": True,
-        "utilities_included": False,
-        "wifi_available": True,
-        "no_of_bedrooms": 1,
-        "no_of_bathrooms": 1,
-        "house_type": "Apartment",
-        "distance_to_college": "0.4 miles",
-        "transportation_options": ["Bus"],
-        "recommended_by": "David Wilson",
-        "contact_details": "15551112222",
-        "image_urls": ["assets/house7.jpg"]
-    },
-    {
-        "id": "h008",
-        "city": "Weehawken",
-        "street_address": "50 Harbor Blvd",
-        "rent": 2300,
-        "lease_duration": "12 months",
-        "availability_date": "2025-05-10",
-        "furnished": False,
-        "utilities_included": False,
-        "wifi_available": True,
-        "no_of_bedrooms": 1,
-        "no_of_bathrooms": 1,
-        "house_type": "Apartment",
-        "distance_to_college": "1.8 miles",
-        "transportation_options": ["Bus", "Ferry"],
-        "recommended_by": "Amanda Thompson",
-        "contact_details": "15551113333",
-        "image_urls": ["assets/house8.jpg", "assets/house8_2.jpg"]
-    }
-]
+# # Dummy housing data for Stevens Institute of Technology area
+# DUMMY_HOUSING_DATA = [
+#     {
+#         "id": "h001",
+#         "city": "Hoboken",
+#         "street_address": "215 River St",
+#         "rent": 1850,
+#         "lease_duration": "12 months",
+#         "availability_date": "2025-04-15",
+#         "furnished": True,
+#         "utilities_included": True,
+#         "wifi_available": True,
+#         "no_of_bedrooms": 1,
+#         "no_of_bathrooms": 1,
+#         "house_type": "Apartment",
+#         "distance_to_college": "0.3 miles",
+#         "transportation_options": ["Bus", "Path Train"],
+#         "recommended_by": "John Smith",
+#         "contact_details": "15551112233",
+#         "image_urls": ["assets/house1.jpg", "assets/house1_2.jpg", "assets/house1_3.jpg"]
+#     },
+#     {
+#         "id": "h002",
+#         "city": "Hoboken",
+#         "street_address": "78 Washington St",
+#         "rent": 2100,
+#         "lease_duration": "9 months",
+#         "availability_date": "2025-04-10",
+#         "furnished": True,
+#         "utilities_included": True,
+#         "wifi_available": True,
+#         "no_of_bedrooms": 1,
+#         "no_of_bathrooms": 1,
+#         "house_type": "Studio",
+#         "distance_to_college": "0.2 miles",
+#         "transportation_options": ["Bus", "Path Train"],
+#         "recommended_by": "Sarah Johnson",
+#         "contact_details": "15551115566",
+#         "image_urls": ["assets/house2.jpg", "assets/house2_2.jpg", "assets/house2_3.jpg"]
+#     },
+#     {
+#         "id": "h003",
+#         "city": "Hoboken",
+#         "street_address": "420 Hudson St",
+#         "rent": 2650,
+#         "lease_duration": "12 months",
+#         "availability_date": "2025-05-01",
+#         "furnished": True,
+#         "utilities_included": False,
+#         "wifi_available": True,
+#         "no_of_bedrooms": 2,
+#         "no_of_bathrooms": 1,
+#         "house_type": "Apartment",
+#         "distance_to_college": "0.4 miles",
+#         "transportation_options": ["Bus", "Path Train"],
+#         "recommended_by": "Mike Peters",
+#         "contact_details": "15551117788",
+#         "image_urls": ["assets/house3.jpg", "assets/house3_2.jpg"]
+#     },
+#     {
+#         "id": "h004",
+#         "city": "Jersey City",
+#         "street_address": "25 River Dr",
+#         "rent": 1950,
+#         "lease_duration": "6 months",
+#         "availability_date": "2025-04-05",
+#         "furnished": False,
+#         "utilities_included": False,
+#         "wifi_available": False,
+#         "no_of_bedrooms": 1,
+#         "no_of_bathrooms": 1,
+#         "house_type": "Condo",
+#         "distance_to_college": "1.2 miles",
+#         "transportation_options": ["Bus", "Path Train", "Light Rail"],
+#         "recommended_by": "Jane Doe",
+#         "contact_details": "15551118899",
+#         "image_urls": ["assets/house4.jpg"]
+#     },
+#     {
+#         "id": "h005",
+#         "city": "Hoboken",
+#         "street_address": "89 Willow Ave",
+#         "rent": 1700,
+#         "lease_duration": "12 months",
+#         "availability_date": "2025-04-20",
+#         "furnished": False,
+#         "utilities_included": True,
+#         "wifi_available": True,
+#         "no_of_bedrooms": 1,
+#         "no_of_bathrooms": 1,
+#         "house_type": "Apartment",
+#         "distance_to_college": "0.5 miles",
+#         "transportation_options": ["Bus"],
+#         "recommended_by": "Robert Chen",
+#         "contact_details": "15551119900",
+#         "image_urls": ["assets/house5.jpg", "assets/house5_2.jpg"]
+#     },
+#     {
+#         "id": "h006",
+#         "city": "Hoboken",
+#         "street_address": "505 Madison St",
+#         "rent": 3200,
+#         "lease_duration": "12 months",
+#         "availability_date": "2025-05-15",
+#         "furnished": True,
+#         "utilities_included": True,
+#         "wifi_available": True,
+#         "no_of_bedrooms": 3,
+#         "no_of_bathrooms": 2,
+#         "house_type": "Townhouse",
+#         "distance_to_college": "0.7 miles",
+#         "transportation_options": ["Bus", "Path Train"],
+#         "recommended_by": "Lisa Martinez",
+#         "contact_details": "15551110011",
+#         "image_urls": ["assets/house6.jpg", "assets/house6_2.jpg", "assets/house6_3.jpg"]
+#     },
+#     {
+#         "id": "h007",
+#         "city": "Hoboken",
+#         "street_address": "123 Clinton St",
+#         "rent": 2000,
+#         "lease_duration": "9 months",
+#         "availability_date": "2025-04-01",
+#         "furnished": True,
+#         "utilities_included": False,
+#         "wifi_available": True,
+#         "no_of_bedrooms": 1,
+#         "no_of_bathrooms": 1,
+#         "house_type": "Apartment",
+#         "distance_to_college": "0.4 miles",
+#         "transportation_options": ["Bus"],
+#         "recommended_by": "David Wilson",
+#         "contact_details": "15551112222",
+#         "image_urls": ["assets/house7.jpg"]
+#     },
+#     {
+#         "id": "h008",
+#         "city": "Weehawken",
+#         "street_address": "50 Harbor Blvd",
+#         "rent": 2300,
+#         "lease_duration": "12 months",
+#         "availability_date": "2025-05-10",
+#         "furnished": False,
+#         "utilities_included": False,
+#         "wifi_available": True,
+#         "no_of_bedrooms": 1,
+#         "no_of_bathrooms": 1,
+#         "house_type": "Apartment",
+#         "distance_to_college": "1.8 miles",
+#         "transportation_options": ["Bus", "Ferry"],
+#         "recommended_by": "Amanda Thompson",
+#         "contact_details": "15551113333",
+#         "image_urls": ["assets/house8.jpg", "assets/house8_2.jpg"]
+#     }
+# ]
 
 if __name__ == "__main__":
     # Check if API keys are set
@@ -517,7 +485,6 @@ if __name__ == "__main__":
     else:
         # Initialize database with sample data
         initialize_database()
-    
-    # Get port from environment variable for Render.com
+        
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
